@@ -1,6 +1,4 @@
-import { PDFDocument, PageSizes } from 'pdf-lib';
 import type { ProcessedImage } from './image-processing';
-import { getRotatedImageBlob } from './image-processing';
 
 export type PageSizeOption = 'a4' | 'letter' | 'legal' | 'original';
 export type OrientationOption = 'portrait' | 'landscape';
@@ -14,136 +12,146 @@ export interface PdfSettings {
   scaling: ScalingOption;
 }
 
-const MARGIN_POINTS = {
+const MARGIN_MM: Record<MarginOption, number> = {
   none: 0,
-  small: 20, // ~0.28 inches
-  medium: 40, // ~0.55 inches
-  large: 72, // 1 inch
+  small: 5,
+  medium: 10,
+  large: 25.4,
 };
 
-const STANDARD_SIZES = {
-  a4: PageSizes.A4,
-  letter: PageSizes.Letter,
-  legal: PageSizes.Legal,
+const PAGE_FORMATS: Record<string, string> = {
+  a4: 'a4',
+  letter: 'letter',
+  legal: 'legal',
 };
 
-// Sleep utility to prevent UI blocking
-const yieldToMain = () => new Promise(resolve => setTimeout(resolve, 0));
+const yieldToMain = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+
+const loadImageElement = (src: string): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = (_e) => reject(new Error('Failed to load image'));
+    img.src = src;
+  });
+
+const imageToCanvas = async (
+  imgData: ProcessedImage
+): Promise<{ dataUrl: string; width: number; height: number; format: 'JPEG' | 'PNG' }> => {
+  const el = await loadImageElement(imgData.previewUrl);
+
+  const rotation = imgData.rotation;
+  const isVertical = rotation === 90 || rotation === 270;
+  const cw = isVertical ? el.naturalHeight : el.naturalWidth;
+  const ch = isVertical ? el.naturalWidth : el.naturalHeight;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D context unavailable');
+
+  ctx.translate(cw / 2, ch / 2);
+  ctx.rotate((rotation * Math.PI) / 180);
+  ctx.drawImage(el, -el.naturalWidth / 2, -el.naturalHeight / 2);
+
+  const isPng = imgData.type === 'image/png';
+  const mimeType = isPng ? 'image/png' : 'image/jpeg';
+  const dataUrl = canvas.toDataURL(mimeType, 0.95);
+
+  return { dataUrl, width: cw, height: ch, format: isPng ? 'PNG' : 'JPEG' };
+};
 
 export const generatePDF = async (
   images: ProcessedImage[],
   settings: PdfSettings,
   onProgress: (progress: number, status: string) => void
 ): Promise<string> => {
-  try {
-    onProgress(5, "Initializing PDF engine...");
+  onProgress(5, 'Loading PDF engine...');
+  await yieldToMain();
+
+  // Dynamic import to avoid startup crashes
+  const { jsPDF } = await import('jspdf');
+
+  onProgress(10, 'Initializing...');
+  await yieldToMain();
+
+  let pdf: InstanceType<typeof jsPDF> | null = null;
+
+  for (let i = 0; i < images.length; i++) {
+    const imgData = images[i];
+    onProgress(
+      15 + Math.floor((i / images.length) * 75),
+      `Processing image ${i + 1} of ${images.length}...`
+    );
     await yieldToMain();
-    
-    const pdfDoc = await PDFDocument.create();
-    
-    for (let i = 0; i < images.length; i++) {
-      const imgData = images[i];
-      onProgress(10 + Math.floor((i / images.length) * 80), `Processing image ${i + 1} of ${images.length}...`);
-      await yieldToMain();
 
-      let imageBytes: Uint8Array;
-      let isPng = imgData.type === 'image/png';
-      
-      // If rotated or WebP, process via canvas first to bake in rotation/convert format
-      if (imgData.rotation !== 0 || imgData.type === 'image/webp') {
-        const targetFormat = isPng ? 'image/png' : 'image/jpeg';
-        imageBytes = await getRotatedImageBlob(imgData.previewUrl, imgData.rotation, targetFormat);
-        // Force jpeg extension if webp was converted
-        if (imgData.type === 'image/webp') isPng = false; 
-      } else {
-        // Use original bytes directly to prevent any compression loss
-        const arrayBuffer = await imgData.file.arrayBuffer();
-        imageBytes = new Uint8Array(arrayBuffer);
-      }
+    const { dataUrl, width: imgPx, height: imgPx2, format } = await imageToCanvas(imgData);
+    const imgWMm = (imgPx * 25.4) / 96;
+    const imgHMm = (imgPx2 * 25.4) / 96;
 
-      let pdfImage;
-      try {
-        pdfImage = isPng ? await pdfDoc.embedPng(imageBytes) : await pdfDoc.embedJpg(imageBytes);
-      } catch (e) {
-        // Fallback if parsing fails (sometimes PNGs have weird chunks)
-        const fallbackBytes = await getRotatedImageBlob(imgData.previewUrl, 0, 'image/jpeg');
-        pdfImage = await pdfDoc.embedJpg(fallbackBytes);
-      }
+    let pageW: number;
+    let pageH: number;
 
-      const imgDims = pdfImage.scale(1);
-      const margin = MARGIN_POINTS[settings.margins];
-      
-      let pageWidth = 0;
-      let pageHeight = 0;
-
-      // Determine Page Size
-      if (settings.pageSize === 'original') {
-        pageWidth = imgDims.width + (margin * 2);
-        pageHeight = imgDims.height + (margin * 2);
-      } else {
-        const standardSize = STANDARD_SIZES[settings.pageSize];
-        pageWidth = settings.orientation === 'portrait' ? standardSize[0] : standardSize[1];
-        pageHeight = settings.orientation === 'portrait' ? standardSize[1] : standardSize[0];
-      }
-
-      const page = pdfDoc.addPage([pageWidth, pageHeight]);
-      
-      const contentWidth = pageWidth - (margin * 2);
-      const contentHeight = pageHeight - (margin * 2);
-
-      let finalWidth = imgDims.width;
-      let finalHeight = imgDims.height;
-      let x = margin;
-      let y = margin;
-
-      // Calculate Scaling
-      if (settings.pageSize !== 'original') {
-        const scaleX = contentWidth / imgDims.width;
-        const scaleY = contentHeight / imgDims.height;
-        
-        if (settings.scaling === 'fit') {
-          const scale = Math.min(scaleX, scaleY);
-          finalWidth = imgDims.width * scale;
-          finalHeight = imgDims.height * scale;
-          // Center it
-          x = margin + (contentWidth - finalWidth) / 2;
-          y = margin + (contentHeight - finalHeight) / 2;
-        } 
-        else if (settings.scaling === 'fill') {
-          const scale = Math.max(scaleX, scaleY);
-          finalWidth = imgDims.width * scale;
-          finalHeight = imgDims.height * scale;
-          // Center it (will crop overflow visually in standard viewers, though PDF doesn't strictly clip unless we define a clip path. For simplicity, we just draw it centered and overflowing)
-          x = margin + (contentWidth - finalWidth) / 2;
-          y = margin + (contentHeight - finalHeight) / 2;
-        }
-        else if (settings.scaling === 'original') {
-          // Center it without scaling
-          x = margin + (contentWidth - finalWidth) / 2;
-          y = margin + (contentHeight - finalHeight) / 2;
-        }
-      }
-
-      page.drawImage(pdfImage, {
-        x,
-        y,
-        width: finalWidth,
-        height: finalHeight,
-      });
+    if (settings.pageSize === 'original') {
+      pageW = imgWMm;
+      pageH = imgHMm;
+    } else {
+      const orientation = settings.orientation === 'landscape' ? 'l' : 'p';
+      const temp = new jsPDF({ orientation, unit: 'mm', format: PAGE_FORMATS[settings.pageSize] });
+      pageW = temp.internal.pageSize.getWidth();
+      pageH = temp.internal.pageSize.getHeight();
     }
 
-    onProgress(95, "Saving PDF document...");
-    await yieldToMain();
-    
-    const pdfBytes = await pdfDoc.save();
-    
-    onProgress(100, "Done!");
-    
-    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-    return URL.createObjectURL(blob);
-    
-  } catch (error) {
-    console.error("PDF Generation Error:", error);
-    throw new Error("Failed to generate PDF. Make sure all images are valid.");
+    if (pdf === null) {
+      pdf = new jsPDF({
+        orientation: pageW >= pageH ? 'l' : 'p',
+        unit: 'mm',
+        format: [pageW, pageH],
+        compress: false,
+      });
+    } else {
+      pdf.addPage([pageW, pageH], pageW >= pageH ? 'l' : 'p');
+    }
+
+    const margin = MARGIN_MM[settings.margins];
+    const contentW = pageW - margin * 2;
+    const contentH = pageH - margin * 2;
+
+    let drawW = imgWMm;
+    let drawH = imgHMm;
+    let drawX = margin;
+    let drawY = margin;
+
+    if (settings.pageSize !== 'original') {
+      if (settings.scaling === 'fit') {
+        const scale = Math.min(contentW / imgWMm, contentH / imgHMm);
+        drawW = imgWMm * scale;
+        drawH = imgHMm * scale;
+        drawX = margin + (contentW - drawW) / 2;
+        drawY = margin + (contentH - drawH) / 2;
+      } else if (settings.scaling === 'fill') {
+        const scale = Math.max(contentW / imgWMm, contentH / imgHMm);
+        drawW = imgWMm * scale;
+        drawH = imgHMm * scale;
+        drawX = margin + (contentW - drawW) / 2;
+        drawY = margin + (contentH - drawH) / 2;
+      } else {
+        // original size, centered
+        drawX = margin + (contentW - imgWMm) / 2;
+        drawY = margin + (contentH - imgHMm) / 2;
+      }
+    }
+
+    pdf.addImage(dataUrl, format, drawX, drawY, drawW, drawH, undefined, 'NONE');
   }
+
+  onProgress(95, 'Saving PDF...');
+  await yieldToMain();
+
+  if (!pdf) throw new Error('No images were processed');
+
+  const output = pdf.output('blob');
+  onProgress(100, 'Done!');
+  return URL.createObjectURL(output);
 };

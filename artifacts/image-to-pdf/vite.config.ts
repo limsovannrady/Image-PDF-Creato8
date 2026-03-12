@@ -54,6 +54,9 @@ export default defineConfig({
     dedupe: ["react", "react-dom"],
   },
   root: path.resolve(import.meta.dirname),
+  optimizeDeps: {
+    include: ["jspdf", "react-dropzone", "@dnd-kit/core", "@dnd-kit/sortable", "@dnd-kit/utilities", "framer-motion"],
+  },
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,

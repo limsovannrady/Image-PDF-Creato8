@@ -30,7 +30,7 @@ export default function Converter() {
     scaling: 'fit'
   });
 
-  const previewRef = useRef<HTMLIFrameElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
 
   // Clean up object URLs on unmount to prevent memory leaks
   useEffect(() => {
