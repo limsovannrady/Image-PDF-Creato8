@@ -1,0 +1,16 @@
+packages:
+  "pdf-lib": "For high-quality client-side PDF generation without compression loss"
+  "@dnd-kit/core": "For robust drag-and-drop mechanics"
+  "@dnd-kit/sortable": "For sortable image grid layout"
+  "@dnd-kit/utilities": "Utilities for dnd-kit positioning"
+  "react-dropzone": "For advanced file drag-and-drop capabilities"
+  "framer-motion": "For premium layout animations and smooth transitions"
+  "clsx": "For conditional class name merging"
+  "tailwind-merge": "For conflict-free tailwind class merging"
+
+images: []
+
+notes:
+  - "Fully client-side processing using pdf-lib."
+  - "Canvas API is used for image pre-processing (rotation, webp conversion) before embedding in PDF."
+  - "Dnd-kit handles the complex grid sorting."
